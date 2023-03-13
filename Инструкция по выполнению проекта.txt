@@ -1,0 +1,137 @@
+
+1. Создайте справочник стоимости доставки в страны shipping_country_rates из данных, 
+указанных в shipping_country и shipping_country_base_rate, сделайте первичный ключ таблицы — серийный id, 
+то есть серийный идентификатор каждой строчки. Важно дать серийному ключу имя «id». 
+Справочник должен состоять из уникальных пар полей из таблицы shipping.
+
+drop table if exists public.shipping_country_rates;
+
+create table public.shipping_country_rates (
+	id serial primary key,
+	shipping_country text null,
+	shipping_country_base_rate numeric(14,3) null
+);
+
+
+insert into public.shipping_country_rates(shipping_country, shipping_country_base_rate)
+select distinct shipping_country, shipping_country_base_rate from shipping s
+
+-----------------------------------
+
+2. Создайте справочник тарифов доставки вендора по договору shipping_agreement из данных строки 
+vendor_agreement_description через разделитель «:» (двоеточие без кавычек).
+Названия полей: 
+ 
+agreement_id,
+agreement_number,
+agreement_rate,
+agreement_commission.
+agreement_id сделайте первичным ключом.
+
+Учтите, что при функции regexp возвращаются строковые значения. 
+Поэтому чтобы привести полученные значения в нужный для таблицы формат, полезно воспользоваться функцией cast().
+
+drop table if exists public.shipping_agreement;
+
+create table public.shipping_agreement (
+	agreement_id bigint primary key,
+	agreement_number text null,
+	agreement_rate numeric(14,3) null,
+	agreement_commission numeric(14,3) null
+);
+
+insert into public.shipping_agreement(agreement_id, agreement_number, agreement_rate, agreement_commission)
+select 
+	cast(vendor_agreement_description[1] as integer) as agreement_id,
+	vendor_agreement_description[2] as agreement_number,
+	cast(vendor_agreement_description[3] as numeric(14,3)) as agreement_rate,
+	cast(vendor_agreement_description[4] as numeric(14,3)) as agreement_commission
+from
+    (select distinct regexp_split_to_array(vendor_agreement_description, ':') as vendor_agreement_description
+	 from shipping) as t1
+order by agreement_id;
+
+select * from public.shipping_agreement;
+
+-----------------------------------
+
+3. Создайте справочник о типах доставки shipping_transfer из строки shipping_transfer_description 
+через разделитель «:» (двоеточие без кавычек). 
+Названия полей: 
+transfer_type,
+transfer_model,
+shipping_transfer_rate .
+Первичным ключом таблицы сделайте серийный id.
+
+Важно помнить про размерность знаков после запятой при выделении фиксированной длины в типе  numeric(). 
+Например, если shipping_transfer_rate равен 2.5%, то при миграции в тип numeric(14,2) у вас отбросится 0,5%. 
+
+drop table if exists public.shipping_transfer;
+
+create table public.shipping_transfer (
+	id serial primary key,
+	transfer_type text null,
+	transfer_model text null,
+	shipping_transfer_rate numeric(14,3) null
+);
+
+insert into public.shipping_transfer(transfer_type, transfer_model, shipping_transfer_rate)
+select 
+	shipping_transfer_description[1] as transfer_type,
+	shipping_transfer_description[2] as transfer_model,
+	shipping_transfer_rate
+from
+    (select distinct regexp_split_to_array(shipping_transfer_description, ':') as shipping_transfer_description, shipping_transfer_rate
+	 from shipping) as t1
+order by transfer_type, transfer_model;
+
+select * from public.shipping_transfer;
+
+-----------------------------------
+
+4. Создайте таблицу shipping_info, справочник комиссий по странам, с уникальными доставками shipping_id и 
+свяжите ее с созданными справочниками shipping_country_rates, shipping_agreement, shipping_transfer и 
+константной информации о доставке shipping_plan_datetime, payment_amount, vendor_id.
+
+
+
+-----------------------------------
+
+5. Создайте таблицу статусов о доставке shipping_status и включите туда информацию из лога shipping (status , state). 
+Добавьте туда вычислимую информацию по фактическому времени доставки 
+shipping_start_fact_datetime, shipping_end_fact_datetime. Отразите для каждого уникального shipping_id его итоговое состояние доставки.
+
+Данные в таблице должны отражать максимальный status и state по максимальному времени лога state_datetime в таблице shipping.
+
+shipping_start_fact_datetime — это время state_datetime, когда state заказа перешёл в состояние booked.
+shipping_end_fact_datetime — это время state_datetime , когда state заказа перешел в состояние recieved.
+
+Удобно использовать оператор with для объявления временной таблицы, потому что можно сохранить информацию по shipping_id 
+и максимальному значению state_datetime. Далее при записи информации в shipping_status 
+можно сделать JOIN и дополнить таблицу нужными данными.
+
+drop table if exists public.shipping_status;
+
+create table public.shipping_status (
+	shipping_id bigint NOT NULL,
+	status text null,
+	state text null,
+	shipping_start_fact_datetime timestamp NULL,
+	shipping_end_fact_datetime timestamp NULL
+);
+
+insert into public.shipping_status(shipping_id, status, state, shipping_start_fact_datetime, shipping_end_fact_datetime)
+select shippingid as shipping_id,	   
+	   array_[1] as status,
+	   array_[2] as state,
+	   state_datetime as shipping_start_fact_datetime,
+       TO_TIMESTAMP(array_[3], 'YYYY-MM-DD HH24:MI:ss') as shipping_end_fact_datetime	   
+	   
+from
+(select shippingid, min(s.state_datetime) as state_datetime,
+	regexp_split_to_array((select CONCAT_WS(';', status, state, state_datetime) from shipping s1 where s.shippingid=s1.shippingid order by s1.state_datetime desc limit 1), ';') as array_
+from shipping s
+group by s.shippingid) t;
+
+select * from public.shipping_status;
+
