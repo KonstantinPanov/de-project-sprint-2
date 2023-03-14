@@ -93,6 +93,34 @@ select * from public.shipping_transfer;
 свяжите ее с созданными справочниками shipping_country_rates, shipping_agreement, shipping_transfer и 
 константной информации о доставке shipping_plan_datetime, payment_amount, vendor_id.
 
+Cвязи с тремя таблицами-справочниками лучше делать внешними ключами — это обеспечит целостность модели данных и защитит её, 
+если нарушится логика записи в таблицы.
+
+drop table if exists public.shipping_info;
+
+create table public.shipping_info (
+	shipping_id bigint primary key,
+        vendor_id bigint NULL,
+	payment_amount numeric(14, 2) NULL,
+	shipping_plan_datetime timestamp NULL,
+	shipping_transfer_id bigint NULL,
+	shipping_agreement_id bigint NULL,
+	shipping_country_rate_id bigint NULL
+
+);
+
+with shipping_transfer AS
+	(select id as shipping_transfer_id, concat_ws(':', transfer_type, transfer_model) as shipping_transfer_description from shipping_transfer),
+
+	shipping_country_rates AS
+	(select id as shipping_country_rate_id, shipping_country from shipping_country_rates)
+
+insert into public.shipping_info(shipping_id, vendor_id, payment_amount, shipping_plan_datetime, shipping_transfer_id, shipping_agreement_id, shipping_country_rate_id)
+select s.shippingid as shipping_id, s.vendorid as vendor_id, s.payment_amount, s.shipping_plan_datetime, st.shipping_transfer_id, cast(split_part(vendor_agreement_description, ':', 1) as bigint) as shipping_agreement_id, scr.shipping_country_rate_id
+from shipping s
+left join shipping_transfer st using (shipping_transfer_description)
+left join shipping_country_rates scr using (shipping_country)
+group by s.shippingid, s.vendorid, s.payment_amount, s.shipping_plan_datetime, s.vendor_agreement_description, st.shipping_transfer_id, shipping_agreement_id, scr.shipping_country_rate_id;
 
 
 -----------------------------------
@@ -134,4 +162,69 @@ from shipping s
 group by s.shippingid) t;
 
 select * from public.shipping_status;
+
+-----------------------------------
+
+6. Создайте представление shipping_datamart на основании готовых таблиц для аналитики и включите в него:
+shipping_id
+vendor_id
+transfer_type — тип доставки из таблицы shipping_transfer
+
+full_day_at_shipping — количество полных дней, в течение которых длилась доставка.
+Высчитывается так: shipping_end_fact_datetime − shipping_start_fact_datetime
+
+is_delay — статус, показывающий просрочена ли доставка.
+Высчитывается так: shipping_end_fact_datetime > shipping_plan_datetime → 1; 0
+
+is_shipping_finish — статус, показывающий, что доставка завершена. Если финальный status = finished → 1; 0
+
+delay_day_at_shipping — количество дней, на которые была просрочена доставка.
+Высчитывается как: shipping_end_fact_datetime > shipping_plan_datetime → shipping_end_fact_datetime − shipping_plan_datetime; 0)
+
+payment_amount — сумма платежа пользователя
+
+vat — итоговый налог на доставку
+Высчитывается так: payment_amount ∗ (shipping_country_base_rate + agreement_rate + shipping_transfer_rate)
+
+profit — итоговый доход компании с доставки.
+Высчитывается как: payment_amount ∗ agreement_commission
+
+Вы уже создали внешние ключи в справочниках, и здесь можно заметить, чем они удобны. 
+Если использовать JOIN трёх справочников: shipping_transfer, shipping_country_rates и 
+shipping_agreement — к таблице с внешними ключами shipping_info, то разные идентификаторы внешних 
+ключей могут автоматически подсвечивать возможные связи.
+
+Чтобы получить разницу между датами, удобно использовать функцию age(). 
+Для получения целых дней можно использовать функцию date_part(’day’, ... )
+
+create view shipping_datamart as
+select si.shipping_id, 
+       si.vendor_id, 
+       st.transfer_type, 
+       date_part('day', age(ss.shipping_end_fact_datetime, ss.shipping_start_fact_datetime)) as full_day_at_shipping,
+       case
+	       when ss.shipping_end_fact_datetime > si.shipping_plan_datetime then 1
+       	   else 0
+       end as is_delay,  
+       case
+	       when ss.status = 'finished' then 1
+       	   else 0
+       end as is_shipping_finish,
+       case
+	       when ss.shipping_end_fact_datetime > si.shipping_plan_datetime then date_part('day', age(ss.shipping_end_fact_datetime, si.shipping_plan_datetime))
+       	   else 0
+       end as delay_day_at_shipping,
+       si.payment_amount,  
+       (si.payment_amount * (scr.shipping_country_base_rate + sa.agreement_rate + st.shipping_transfer_rate)) as vat,
+       si.payment_amount * sa.agreement_commission as profit
+
+       
+from shipping_info si
+inner join shipping_transfer st on st.id = si.shipping_transfer_id 
+inner join shipping_status ss on ss.shipping_id = si.shipping_id 
+inner join shipping_country_rates scr on scr.id = si.shipping_country_rate_id 
+inner join shipping_agreement sa on sa.agreement_id = si.shipping_agreement_id 
+
+select count(*) from shipping_datamart
+
 
