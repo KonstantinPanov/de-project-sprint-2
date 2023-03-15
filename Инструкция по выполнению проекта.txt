@@ -96,7 +96,7 @@ select * from public.shipping_transfer;
 Cвязи с тремя таблицами-справочниками лучше делать внешними ключами — это обеспечит целостность модели данных и защитит её, 
 если нарушится логика записи в таблицы.
 
-drop table if exists public.shipping_info;
+drop table if exists public.shipping_info cascade;
 
 create table public.shipping_info (
 	shipping_id bigint primary key,
@@ -105,7 +105,10 @@ create table public.shipping_info (
 	shipping_plan_datetime timestamp NULL,
 	shipping_transfer_id bigint NULL,
 	shipping_agreement_id bigint NULL,
-	shipping_country_rate_id bigint NULL
+	shipping_country_rate_id bigint NULL,
+	FOREIGN KEY (shipping_transfer_id) REFERENCES shipping_transfer(id) ON UPDATE cascade,
+	FOREIGN KEY (shipping_agreement_id) REFERENCES shipping_agreement(agreement_id) ON UPDATE cascade,
+	FOREIGN KEY (shipping_country_rate_id) REFERENCES shipping_country_rates(id) ON UPDATE cascade
 
 );
 
@@ -148,6 +151,50 @@ create table public.shipping_status (
 	shipping_end_fact_datetime timestamp NULL
 );
 
+
+with 
+	
+	-- максимальное временя лога state_datetime в таблице shipping	
+
+	state_datetime as
+	(select shippingid, max(state_datetime) as state_datetime
+	from shipping group by shippingid),
+
+	-- state заказа перешёл в состояние booked
+
+	state_booked as 
+	(select shippingid, state_datetime as shipping_start_fact_datetime
+	from shipping where state='booked'),
+	
+	-- state заказа перешел в состояние recieved	
+
+	state_recieved as 
+	(select shippingid, max(case when state = 'recieved' then state_datetime else null end) as shipping_end_fact_datetime 
+	from shipping group by shippingid order by shippingid)
+
+-- Данные в таблице должны отражать максимальный status и state по максимальному времени лога state_datetime в таблице shipping.	
+
+insert into public.shipping_status(shipping_id, status, state, shipping_start_fact_datetime, shipping_end_fact_datetime)
+select s.shippingid as shipping_id, s.status, s.state, sb.shipping_start_fact_datetime, sr.shipping_end_fact_datetime 
+from shipping s
+inner join state_booked sb on sb.shippingid=s.shippingid
+inner join state_datetime sd on sd.shippingid=s.shippingid and sd.state_datetime=s.state_datetime
+inner join state_recieved sr on sr.shippingid=s.shippingid
+order by s.shippingid;
+
+
+/*
+
+drop table if exists public.shipping_status;
+
+create table public.shipping_status (
+	shipping_id bigint NOT NULL,
+	status text null,
+	state text null,
+	shipping_start_fact_datetime timestamp NULL,
+	shipping_end_fact_datetime timestamp NULL
+);
+
 insert into public.shipping_status(shipping_id, status, state, shipping_start_fact_datetime, shipping_end_fact_datetime)
 select shippingid as shipping_id,	   
 	   array_[1] as status,
@@ -162,6 +209,9 @@ from shipping s
 group by s.shippingid) t;
 
 select * from public.shipping_status;
+
+*/
+
 
 -----------------------------------
 
@@ -197,11 +247,13 @@ shipping_agreement — к таблице с внешними ключами ship
 Чтобы получить разницу между датами, удобно использовать функцию age(). 
 Для получения целых дней можно использовать функцию date_part(’day’, ... )
 
+drop view shipping_datamart;
+
 create view shipping_datamart as
 select si.shipping_id, 
        si.vendor_id, 
        st.transfer_type, 
-       date_part('day', age(ss.shipping_end_fact_datetime, ss.shipping_start_fact_datetime)) as full_day_at_shipping,
+       extract(day from (ss.shipping_end_fact_datetime - ss.shipping_start_fact_datetime)) as full_day_at_shipping,
        case
 	       when ss.shipping_end_fact_datetime > si.shipping_plan_datetime then 1
        	   else 0
@@ -223,8 +275,8 @@ from shipping_info si
 inner join shipping_transfer st on st.id = si.shipping_transfer_id 
 inner join shipping_status ss on ss.shipping_id = si.shipping_id 
 inner join shipping_country_rates scr on scr.id = si.shipping_country_rate_id 
-inner join shipping_agreement sa on sa.agreement_id = si.shipping_agreement_id 
+inner join shipping_agreement sa on sa.agreement_id = si.shipping_agreement_id;
 
-select count(*) from shipping_datamart
+select count(*) from shipping_datamart;
 
 
